@@ -295,6 +295,18 @@ if(BUILD_FULL_VERSION)
     install(TARGETS sleep_vs_cv DESTINATION bin)
     message(STATUS "Building example: sleep_vs_cv")
 
+    # Example 8: Hybrid callbacks (performance comparison)
+    add_executable(example_hybrid_callbacks examples/example_hybrid_callbacks.cpp)
+    target_link_libraries(example_hybrid_callbacks
+        kraken_common
+        simdjson
+        ${OPENSSL_LIBRARIES}
+        ${Boost_LIBRARIES}
+        pthread
+    )
+    install(TARGETS example_hybrid_callbacks DESTINATION bin)
+    message(STATUS "Building example: example_hybrid_callbacks")
+
     # Production Tool: Kraken Live Data Retriever Level 1
     add_executable(retrieve_kraken_live_data_level1 examples/retrieve_kraken_live_data_level1.cpp)
     target_link_libraries(retrieve_kraken_live_data_level1

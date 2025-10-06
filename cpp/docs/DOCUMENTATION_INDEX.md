@@ -37,6 +37,12 @@ All documentation for the Kraken WebSocket C++ project is organized in the `cpp/
 - **[FLOAT_VS_DOUBLE_ANALYSIS.md](FLOAT_VS_DOUBLE_ANALYSIS.md)** - Precision analysis
 - **[PERFORMANCE_EXPLANATION.md](PERFORMANCE_EXPLANATION.md)** - Performance optimization details
 
+#### Callback Mechanisms
+- **[HYBRID_CALLBACKS_QUICK_REFERENCE.md](HYBRID_CALLBACKS_QUICK_REFERENCE.md)** - ⭐⭐⭐ Quick start cheat sheet
+- **[HYBRID_CALLBACKS_SUMMARY.md](HYBRID_CALLBACKS_SUMMARY.md)** - ⭐⭐ Detailed overview and guide
+- **[callback_mechanisms.md](callback_mechanisms.md)** - ⭐ Analysis of 6 callback approaches
+- **[hybrid_implementation_changes.md](hybrid_implementation_changes.md)** - ⭐ Code changes and migration
+
 #### Project Overview
 - **[SUMMARY.md](SUMMARY.md)** - Project overview and summary
 
@@ -67,6 +73,9 @@ Start with these in order:
 - [EXAMPLES_README.md](EXAMPLES_README.md) - Example patterns
 
 ### For Understanding Performance
+- [HYBRID_CALLBACKS_QUICK_REFERENCE.md](HYBRID_CALLBACKS_QUICK_REFERENCE.md) - ⭐⭐⭐ Zero-overhead callback cheat sheet
+- [HYBRID_CALLBACKS_SUMMARY.md](HYBRID_CALLBACKS_SUMMARY.md) - Detailed callback optimization guide
+- [callback_mechanisms.md](callback_mechanisms.md) - Callback design patterns
 - [JSON_LIBRARY_COMPARISON.md](JSON_LIBRARY_COMPARISON.md)
 - [SIMDJSON_USAGE_GUIDE.md](SIMDJSON_USAGE_GUIDE.md)
 - [PERFORMANCE_EXPLANATION.md](PERFORMANCE_EXPLANATION.md)
@@ -103,6 +112,13 @@ Located in `cpp/examples/`:
 
 ## Recent Additions
 
+### Hybrid Callbacks Implementation (October 2025)
+- HYBRID_CALLBACKS_QUICK_REFERENCE.md - Quick start cheat sheet (START HERE)
+- HYBRID_CALLBACKS_SUMMARY.md - Zero-overhead callback implementation
+- callback_mechanisms.md - Comprehensive callback design analysis
+- hybrid_implementation_changes.md - Migration guide and code changes
+- example_hybrid_callbacks.cpp - Benchmarks and usage examples
+
 ### CLI Utils Library (October 2025)
 - CLI_UTILS_FEATURE_SUMMARY.md
 - CLI_UTILS_QUICK_REFERENCE.md
@@ -133,14 +149,15 @@ When adding new documentation:
 
 ## File Count Summary
 
-Total documentation files: **23**
+Total documentation files: **27**
 
-**Core Documentation**: 14 files
+**Core Documentation**: 18 files
 - Tool design: 1 file
 - WebSocket client: 5 files
 - Refactoring: 3 files
 - JSON libraries: 4 files
 - Technical: 2 files
+- Callback mechanisms: 4 files (NEW)
 - Overview: 1 file
 
 **CLI Utils Documentation**: 4 files
