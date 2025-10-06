@@ -1,0 +1,351 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://docs.kraken.com/api/docs/websocket-v2/ticker/",
+  "title": "Kraken WebSocket API v2 - Ticker (Level 1) Schema",
+  "description": "Schema definitions for Kraken WebSocket v2 ticker channel subscription, responses, and data updates",
+  "definitions": {
+    "SubscriptionRequest": {
+      "type": "object",
+      "description": "Request to subscribe to the ticker channel",
+      "required": ["method", "params"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["subscribe"],
+          "description": "Method name for subscription"
+        },
+        "params": {
+          "type": "object",
+          "required": ["channel", "symbol"],
+          "properties": {
+            "channel": {
+              "type": "string",
+              "enum": ["ticker"],
+              "description": "Channel name"
+            },
+            "symbol": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Z0-9]+/[A-Z0-9]+$",
+                "examples": ["BTC/USD", "ETH/USD", "SOL/USD"]
+              },
+              "minItems": 1,
+              "description": "List of currency pairs to subscribe to"
+            },
+            "event_trigger": {
+              "type": "string",
+              "enum": ["bbo", "trades"],
+              "default": "trades",
+              "description": "Event trigger type - 'bbo' for best bid/offer changes, 'trades' for trade events"
+            },
+            "snapshot": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether to send initial snapshot on subscription"
+            },
+            "req_id": {
+              "type": "integer",
+              "description": "Optional client-originated request identifier"
+            }
+          }
+        }
+      }
+    },
+    "SubscriptionResponse": {
+      "type": "object",
+      "description": "Response to subscription request",
+      "required": ["method", "result"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["subscribe"],
+          "description": "Method name echoed from request"
+        },
+        "result": {
+          "type": "object",
+          "required": ["channel", "symbol", "snapshot", "success"],
+          "properties": {
+            "channel": {
+              "type": "string",
+              "enum": ["ticker"],
+              "description": "Channel name"
+            },
+            "symbol": {
+              "type": "string",
+              "description": "Currency pair for this subscription"
+            },
+            "snapshot": {
+              "type": "boolean",
+              "description": "Whether snapshots are enabled"
+            },
+            "success": {
+              "type": "boolean",
+              "description": "Whether subscription was successful"
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional warning messages"
+            },
+            "error": {
+              "type": "string",
+              "description": "Error message if success is false"
+            },
+            "time_in": {
+              "type": "string",
+              "format": "date-time",
+              "description": "RFC3339 timestamp when request was received"
+            },
+            "time_out": {
+              "type": "string",
+              "format": "date-time",
+              "description": "RFC3339 timestamp when response was sent"
+            },
+            "req_id": {
+              "type": "integer",
+              "description": "Request identifier if provided in request"
+            }
+          }
+        },
+        "success": {
+          "type": "boolean",
+          "description": "Overall success status"
+        }
+      }
+    },
+    "TickerData": {
+      "type": "object",
+      "description": "Ticker data for a single symbol",
+      "required": ["symbol", "bid", "bid_qty", "ask", "ask_qty", "last", "volume", "vwap", "low", "high", "change", "change_pct"],
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "description": "Currency pair symbol",
+          "pattern": "^[A-Z0-9]+/[A-Z0-9]+$",
+          "examples": ["BTC/USD", "ETH/USD"]
+        },
+        "bid": {
+          "type": "number",
+          "description": "Best bid price",
+          "minimum": 0
+        },
+        "bid_qty": {
+          "type": "number",
+          "description": "Best bid quantity",
+          "minimum": 0
+        },
+        "ask": {
+          "type": "number",
+          "description": "Best ask price",
+          "minimum": 0
+        },
+        "ask_qty": {
+          "type": "number",
+          "description": "Best ask quantity",
+          "minimum": 0
+        },
+        "last": {
+          "type": "number",
+          "description": "Last trade price",
+          "minimum": 0
+        },
+        "volume": {
+          "type": "number",
+          "description": "24-hour volume",
+          "minimum": 0
+        },
+        "vwap": {
+          "type": "number",
+          "description": "Volume-weighted average price (24h)",
+          "minimum": 0
+        },
+        "low": {
+          "type": "number",
+          "description": "24-hour low price",
+          "minimum": 0
+        },
+        "high": {
+          "type": "number",
+          "description": "24-hour high price",
+          "minimum": 0
+        },
+        "change": {
+          "type": "number",
+          "description": "Absolute price change (24h)"
+        },
+        "change_pct": {
+          "type": "number",
+          "description": "Percentage price change (24h)"
+        }
+      }
+    },
+    "TickerUpdate": {
+      "type": "object",
+      "description": "Ticker snapshot or update message",
+      "required": ["channel", "type", "data"],
+      "properties": {
+        "channel": {
+          "type": "string",
+          "enum": ["ticker"],
+          "description": "Channel name"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["snapshot", "update"],
+          "description": "Message type - 'snapshot' for initial data, 'update' for subsequent changes"
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TickerData"
+          },
+          "minItems": 1,
+          "maxItems": 1,
+          "description": "Array containing single ticker data object"
+        }
+      }
+    },
+    "Heartbeat": {
+      "type": "object",
+      "description": "Heartbeat message to keep connection alive",
+      "required": ["channel"],
+      "properties": {
+        "channel": {
+          "type": "string",
+          "enum": ["heartbeat"],
+          "description": "Heartbeat channel identifier"
+        }
+      }
+    },
+    "UnsubscribeRequest": {
+      "type": "object",
+      "description": "Request to unsubscribe from the ticker channel",
+      "required": ["method", "params"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["unsubscribe"],
+          "description": "Method name for unsubscription"
+        },
+        "params": {
+          "type": "object",
+          "required": ["channel", "symbol"],
+          "properties": {
+            "channel": {
+              "type": "string",
+              "enum": ["ticker"],
+              "description": "Channel name"
+            },
+            "symbol": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Z0-9]+/[A-Z0-9]+$",
+                "examples": ["BTC/USD", "ETH/USD", "SOL/USD"]
+              },
+              "minItems": 1,
+              "description": "List of currency pairs to unsubscribe from"
+            },
+            "event_trigger": {
+              "type": "string",
+              "enum": ["bbo", "trades"],
+              "default": "trades",
+              "description": "Event trigger type - must match the subscription"
+            },
+            "req_id": {
+              "type": "integer",
+              "description": "Optional client-originated request identifier"
+            }
+          }
+        }
+      }
+    },
+    "UnsubscribeResponse": {
+      "type": "object",
+      "description": "Response to unsubscribe request",
+      "required": ["method", "result"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["unsubscribe"],
+          "description": "Method name echoed from request"
+        },
+        "result": {
+          "type": "object",
+          "required": ["channel", "symbol", "success"],
+          "properties": {
+            "channel": {
+              "type": "string",
+              "enum": ["ticker"],
+              "description": "Channel name"
+            },
+            "symbol": {
+              "type": "string",
+              "description": "Currency pair for this unsubscription"
+            },
+            "event_trigger": {
+              "type": "string",
+              "enum": ["bbo", "trades"],
+              "description": "Event trigger type"
+            },
+            "success": {
+              "type": "boolean",
+              "description": "Whether unsubscription was successful"
+            },
+            "error": {
+              "type": "string",
+              "description": "Error message if success is false"
+            },
+            "time_in": {
+              "type": "string",
+              "format": "date-time",
+              "description": "RFC3339 timestamp when request was received"
+            },
+            "time_out": {
+              "type": "string",
+              "format": "date-time",
+              "description": "RFC3339 timestamp when response was sent"
+            },
+            "req_id": {
+              "type": "integer",
+              "description": "Request identifier if provided in request"
+            }
+          }
+        },
+        "success": {
+          "type": "boolean",
+          "description": "Overall success status"
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/definitions/SubscriptionRequest",
+      "title": "Subscription Request"
+    },
+    {
+      "$ref": "#/definitions/SubscriptionResponse",
+      "title": "Subscription Response"
+    },
+    {
+      "$ref": "#/definitions/UnsubscribeRequest",
+      "title": "Unsubscribe Request"
+    },
+    {
+      "$ref": "#/definitions/UnsubscribeResponse",
+      "title": "Unsubscribe Response"
+    },
+    {
+      "$ref": "#/definitions/TickerUpdate",
+      "title": "Ticker Update"
+    },
+    {
+      "$ref": "#/definitions/Heartbeat",
+      "title": "Heartbeat"
+    }
+  ]
+}

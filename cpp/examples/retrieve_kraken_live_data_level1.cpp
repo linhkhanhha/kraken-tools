@@ -1,0 +1,242 @@
+/**
+ * Kraken Live Data Retriever - Level 1 (Ticker Data)
+ *
+ * A production-ready tool for retrieving real-time ticker data from Kraken.
+ * Supports flexible pair input via command-line arguments:
+ * - Direct pair list: -p "BTC/USD,ETH/USD,SOL/USD"
+ * - CSV file: -p /path/to/file.csv:column_name:limit
+ *
+ * Usage:
+ *   ./retrieve_kraken_live_data_level1 -p "BTC/USD,ETH/USD,SOL/USD"
+ *   ./retrieve_kraken_live_data_level1 -p /export1/rocky/dev/kraken/kraken_usd_volume.csv:pair:10
+ *   ./retrieve_kraken_live_data_level1 -p /export1/rocky/dev/kraken/kraken_usd_volume.csv:pair
+ *   ./retrieve_kraken_live_data_level1 -p pairs.csv:symbol
+ *
+ * Output:
+ *   Saves ticker data to kraken_ticker_live_level1.csv
+ */
+
+#include <iostream>
+#include <csignal>
+#include <chrono>
+#include <atomic>
+#include <vector>
+#include <string>
+#include <mutex>
+#include <condition_variable>
+#include "kraken_websocket_client_simdjson_v2.hpp"
+#include "cli_utils.hpp"
+
+using kraken::KrakenWebSocketClientSimdjsonV2;
+using kraken::TickerRecord;
+
+// Global state
+KrakenWebSocketClientSimdjsonV2* g_ws_client = nullptr;
+std::atomic<bool> g_running{true};
+std::mutex g_cv_mutex;
+std::condition_variable g_cv;
+bool g_new_data_available = false;
+
+void signal_handler(int) {
+    std::cout << "\n\nShutting down..." << std::endl;
+    g_running = false;
+    g_cv.notify_all();
+}
+
+void print_usage_examples() {
+    std::cout << std::endl;
+    std::cout << "Examples:" << std::endl;
+    std::cout << "  1. Direct list (comma-separated):" << std::endl;
+    std::cout << "     -p \"BTC/USD,ETH/USD,SOL/USD\"" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  2. Text file (one pair per line, no header):" << std::endl;
+    std::cout << "     -p kraken_tickers.txt          # All lines" << std::endl;
+    std::cout << "     -p kraken_tickers.txt:10       # First 10 lines" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  3. CSV file (with column name):" << std::endl;
+    std::cout << "     -p kraken_usd_volume.csv:pair       # All rows" << std::endl;
+    std::cout << "     -p kraken_usd_volume.csv:pair:10    # First 10 rows" << std::endl;
+    std::cout << std::endl;
+}
+
+int main(int argc, char* argv[]) {
+    // Setup argument parser
+    cli::ArgumentParser parser(argv[0], "Retrieve real-time Level 1 ticker data from Kraken");
+
+    parser.add_argument({
+        "-p", "--pairs",
+        "Pairs specification (direct list or CSV file)",
+        true,  // required
+        true,  // has value
+        "",
+        "SPEC"
+    });
+
+    parser.add_argument({
+        "-o", "--output",
+        "Output CSV filename",
+        false,  // optional
+        true,   // has value
+        "kraken_ticker_live_level1.csv",
+        "FILE"
+    });
+
+    // Parse arguments
+    if (!parser.parse(argc, argv)) {
+        if (!parser.get_errors().empty()) {
+            for (const auto& error : parser.get_errors()) {
+                std::cerr << "Error: " << error << std::endl;
+            }
+            std::cerr << std::endl;
+            parser.print_help();
+            print_usage_examples();
+            return 1;
+        }
+        return 0; // Help shown
+    }
+
+    // Get arguments
+    std::string pairs_spec = parser.get("-p");
+    std::string output_file = parser.get("-o");
+
+    // Parse pairs using InputParser from cli_utils
+    auto parse_result = cli::InputParser::parse(pairs_spec);
+
+    if (!parse_result.success) {
+        std::cerr << "Error: " << parse_result.error_message << std::endl;
+        return 1;
+    }
+
+    std::vector<std::string> symbols = parse_result.values;
+
+    // Display input source
+    std::cout << "Input source: ";
+    if (parse_result.type == cli::InputParser::InputType::DIRECT_LIST) {
+        std::cout << "Direct list (" << symbols.size() << " pairs)" << std::endl;
+    } else if (parse_result.type == cli::InputParser::InputType::CSV_FILE) {
+        std::cout << "CSV file: " << parse_result.filepath
+                  << " [column: " << parse_result.column_name;
+        if (parse_result.limit > 0) {
+            std::cout << ", limit: " << parse_result.limit;
+        }
+        std::cout << "]" << std::endl;
+    } else if (parse_result.type == cli::InputParser::InputType::TEXT_FILE) {
+        std::cout << "Text file: " << parse_result.filepath;
+        if (parse_result.limit > 0) {
+            std::cout << " [limit: " << parse_result.limit << "]";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << "Output file: " << output_file << std::endl;
+    std::cout << std::endl;
+
+    // Display configuration
+    std::cout << "==================================================" << std::endl;
+    std::cout << "Kraken Live Data Retriever - Level 1" << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << "Subscribing to " << symbols.size() << " pairs:" << std::endl;
+    for (size_t i = 0; i < symbols.size() && i < 10; i++) {
+        std::cout << "  - " << symbols[i] << std::endl;
+    }
+    if (symbols.size() > 10) {
+        std::cout << "  ... and " << (symbols.size() - 10) << " more" << std::endl;
+    }
+    std::cout << std::endl;
+
+    // Setup signal handler
+    std::signal(SIGINT, signal_handler);
+
+    // Create WebSocket client
+    KrakenWebSocketClientSimdjsonV2 ws_client;
+    g_ws_client = &ws_client;
+
+    // Setup callbacks
+    ws_client.set_update_callback([&](const TickerRecord& record) {
+        // Signal new data available
+        {
+            std::lock_guard<std::mutex> lock(g_cv_mutex);
+            g_new_data_available = true;
+        }
+        g_cv.notify_one();
+
+        // Print real-time update
+        std::cout << "[UPDATE] " << record.pair
+                  << " | Last: $" << record.last
+                  << " | Bid: $" << record.bid
+                  << " | Ask: $" << record.ask
+                  << " | Vol: " << record.volume
+                  << std::endl;
+    });
+
+    ws_client.set_connection_callback([](bool connected) {
+        std::cout << "[STATUS] WebSocket "
+                  << (connected ? "connected" : "disconnected")
+                  << std::endl;
+    });
+
+    // Start WebSocket client
+    if (!ws_client.start(symbols)) {
+        std::cerr << "Failed to start WebSocket client" << std::endl;
+        return 1;
+    }
+
+    std::cout << "Streaming live data... Press Ctrl+C to stop and save." << std::endl;
+    std::cout << std::endl;
+
+    // Main event loop
+    int update_count = 0;
+    auto start_time = std::chrono::steady_clock::now();
+
+    while (g_running && ws_client.is_running()) {
+        // Wait for new data or periodic timeout
+        {
+            std::unique_lock<std::mutex> lock(g_cv_mutex);
+            g_cv.wait_for(
+                lock,
+                std::chrono::seconds(5),
+                [] { return g_new_data_available || !g_running; }
+            );
+
+            if (!g_running) {
+                break;
+            }
+
+            if (g_new_data_available) {
+                g_new_data_available = false;
+                update_count++;
+            }
+        }
+
+        // Print periodic status
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+
+        if (elapsed > 0 && elapsed % 30 == 0) {
+            std::cout << "\n[STATUS] Running time: " << elapsed << "s"
+                      << " | Updates: " << update_count
+                      << " | Pending: " << ws_client.pending_count()
+                      << "\n" << std::endl;
+        }
+    }
+
+    // Shutdown
+    std::cout << "\nSaving data to " << output_file << "..." << std::endl;
+    ws_client.save_to_csv(output_file);
+    ws_client.stop();
+
+    auto end_time = std::chrono::steady_clock::now();
+    auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        end_time - start_time
+    ).count();
+
+    std::cout << "\n==================================================" << std::endl;
+    std::cout << "Summary" << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << "Pairs monitored: " << symbols.size() << std::endl;
+    std::cout << "Total updates: " << update_count << std::endl;
+    std::cout << "Runtime: " << total_elapsed << " seconds" << std::endl;
+    std::cout << "Output file: " << output_file << std::endl;
+    std::cout << "Shutdown complete." << std::endl;
+
+    return 0;
+}
