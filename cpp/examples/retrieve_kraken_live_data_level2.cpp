@@ -18,6 +18,7 @@
  */
 
 #include <iostream>
+#include <iomanip>
 #include <csignal>
 #include <chrono>
 #include <atomic>
@@ -158,6 +159,42 @@ int main(int argc, char* argv[]) {
         ""
     });
 
+    parser.add_argument({
+        "-f", "--flush-interval",
+        "Flush interval in seconds (0 to disable time-based flush)",
+        false,  // optional
+        true,   // has value
+        "30",
+        "SECONDS"
+    });
+
+    parser.add_argument({
+        "-m", "--memory-threshold",
+        "Memory threshold in bytes (0 to disable memory-based flush)",
+        false,  // optional
+        true,   // has value
+        "10485760",  // 10 MB
+        "BYTES"
+    });
+
+    parser.add_argument({
+        "", "--hourly",
+        "Enable hourly file segmentation (output.20251112_10.jsonl)",
+        false,  // optional
+        false,  // flag
+        "",
+        ""
+    });
+
+    parser.add_argument({
+        "", "--daily",
+        "Enable daily file segmentation (output.20251112.jsonl)",
+        false,  // optional
+        false,  // flag
+        "",
+        ""
+    });
+
     // Parse arguments
     if (!parser.parse(argc, argv)) {
         if (!parser.get_errors().empty()) {
@@ -181,6 +218,18 @@ int main(int argc, char* argv[]) {
     g_show_updates = parser.has("-v") || parser.has("--show-updates");
     g_show_top = parser.has("--show-top");
     g_show_book = parser.has("--show-book");
+
+    // Flush and segmentation arguments
+    int flush_interval = std::stoi(parser.get("-f"));
+    size_t memory_threshold = std::stoull(parser.get("-m"));
+    bool hourly_mode = parser.has("--hourly");
+    bool daily_mode = parser.has("--daily");
+
+    // Validate segmentation flags
+    if (hourly_mode && daily_mode) {
+        std::cerr << "Error: --hourly and --daily cannot be used together" << std::endl;
+        return 1;
+    }
 
     // Parse depth
     int depth = std::stoi(depth_str);
@@ -248,6 +297,36 @@ int main(int argc, char* argv[]) {
     std::cout << "Configuration:" << std::endl;
     std::cout << "  Depth: " << depth << " levels" << std::endl;
     std::cout << "  Checksum validation: " << (skip_validation ? "disabled" : "enabled") << std::endl;
+
+    // Flush configuration
+    std::cout << "  Flush interval: ";
+    if (flush_interval > 0) {
+        std::cout << flush_interval << " seconds";
+    } else {
+        std::cout << "disabled";
+    }
+    std::cout << std::endl;
+
+    std::cout << "  Memory threshold: ";
+    if (memory_threshold > 0) {
+        std::cout << std::fixed << std::setprecision(1)
+                  << (memory_threshold / 1024.0 / 1024.0) << " MB";
+    } else {
+        std::cout << "disabled";
+    }
+    std::cout << std::endl;
+
+    // Segmentation
+    if (hourly_mode || daily_mode) {
+        std::cout << "  Segmentation: ";
+        if (hourly_mode) {
+            std::cout << "hourly (output.YYYYMMDD_HH.jsonl)";
+        } else {
+            std::cout << "daily (output.YYYYMMDD.jsonl)";
+        }
+        std::cout << std::endl;
+    }
+
     std::cout << "  Display mode: ";
     if (g_show_book) {
         std::cout << "Full order book";
@@ -267,13 +346,40 @@ int main(int argc, char* argv[]) {
     // Create output writers
     if (separate_files) {
         g_multi_writer = new MultiFileJsonLinesWriter(output_file);
+
+        // Configure flush and segmentation
+        g_multi_writer->set_flush_interval(std::chrono::seconds(flush_interval));
+        g_multi_writer->set_memory_threshold(memory_threshold);
+
+        if (hourly_mode) {
+            g_multi_writer->set_segment_mode(kraken::SegmentMode::HOURLY);
+        } else if (daily_mode) {
+            g_multi_writer->set_segment_mode(kraken::SegmentMode::DAILY);
+        }
     } else {
         g_single_writer = new JsonLinesWriter(output_file);
-        if (!g_single_writer->is_open()) {
-            std::cerr << "Error: Failed to open output file: " << output_file << std::endl;
-            delete g_single_writer;
-            return 1;
+
+        // Configure flush and segmentation
+        g_single_writer->set_flush_interval(std::chrono::seconds(flush_interval));
+        g_single_writer->set_memory_threshold(memory_threshold);
+
+        if (hourly_mode) {
+            g_single_writer->set_segment_mode(kraken::SegmentMode::HOURLY);
+        } else if (daily_mode) {
+            g_single_writer->set_segment_mode(kraken::SegmentMode::DAILY);
         }
+
+        // Check if file is open after configuration
+        // (file opens in set_segment_mode or on first write)
+        if (hourly_mode || daily_mode) {
+            // File should be open after set_segment_mode
+            if (!g_single_writer->is_open()) {
+                std::cerr << "Error: Failed to open segment file" << std::endl;
+                delete g_single_writer;
+                return 1;
+            }
+        }
+        // For non-segmented mode, file will open on first write
     }
 
     // Create WebSocket client
@@ -405,9 +511,18 @@ int main(int argc, char* argv[]) {
     if (separate_files) {
         std::cout << "Files created: " << g_multi_writer->get_file_count() << std::endl;
         std::cout << "Total records: " << g_multi_writer->get_total_record_count() << std::endl;
+        std::cout << "Total flushes: " << g_multi_writer->get_total_flush_count() << std::endl;
+        if (hourly_mode || daily_mode) {
+            std::cout << "Total segments: " << g_multi_writer->get_total_segment_count() << std::endl;
+        }
     } else {
         std::cout << "Output file: " << output_file << std::endl;
         std::cout << "Records written: " << g_single_writer->get_record_count() << std::endl;
+        std::cout << "Flushes: " << g_single_writer->get_flush_count() << std::endl;
+        if (hourly_mode || daily_mode) {
+            std::cout << "Segments created: " << g_single_writer->get_segment_count() << std::endl;
+            std::cout << "Final segment: " << g_single_writer->get_current_segment_filename() << std::endl;
+        }
     }
 
     std::cout << "Shutdown complete." << std::endl;
