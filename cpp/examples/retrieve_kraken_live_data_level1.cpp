@@ -17,6 +17,7 @@
  */
 
 #include <iostream>
+#include <iomanip>
 #include <csignal>
 #include <chrono>
 #include <atomic>
@@ -81,6 +82,42 @@ int main(int argc, char* argv[]) {
         "FILE"
     });
 
+    parser.add_argument({
+        "-f", "--flush-interval",
+        "Flush interval in seconds (0 to disable time-based flush)",
+        false,  // optional
+        true,   // has value
+        "30",
+        "SECONDS"
+    });
+
+    parser.add_argument({
+        "-m", "--memory-threshold",
+        "Memory threshold in bytes (0 to disable memory-based flush)",
+        false,  // optional
+        true,   // has value
+        "10485760",  // 10MB default
+        "BYTES"
+    });
+
+    parser.add_argument({
+        "", "--hourly",
+        "Enable hourly file segmentation (output.20251112_10.csv)",
+        false,  // optional
+        false,  // no value (flag)
+        "",
+        ""
+    });
+
+    parser.add_argument({
+        "", "--daily",
+        "Enable daily file segmentation (output.20251112.csv)",
+        false,  // optional
+        false,  // no value (flag)
+        "",
+        ""
+    });
+
     // Parse arguments
     if (!parser.parse(argc, argv)) {
         if (!parser.get_errors().empty()) {
@@ -98,6 +135,16 @@ int main(int argc, char* argv[]) {
     // Get arguments
     std::string pairs_spec = parser.get("-p");
     std::string output_file = parser.get("-o");
+    int flush_interval = std::stoi(parser.get("-f"));
+    size_t memory_threshold = std::stoull(parser.get("-m"));
+    bool hourly_mode = parser.has("--hourly");
+    bool daily_mode = parser.has("--daily");
+
+    // Validate segmentation flags (mutually exclusive)
+    if (hourly_mode && daily_mode) {
+        std::cerr << "Error: --hourly and --daily cannot be used together" << std::endl;
+        return 1;
+    }
 
     // Parse pairs using InputParser from cli_utils
     auto parse_result = cli::InputParser::parse(pairs_spec);
@@ -128,6 +175,28 @@ int main(int argc, char* argv[]) {
         std::cout << std::endl;
     }
     std::cout << "Output file: " << output_file << std::endl;
+    std::cout << "Flush interval: " << flush_interval << " seconds";
+    if (flush_interval == 0) {
+        std::cout << " (disabled)";
+    }
+    std::cout << std::endl;
+    std::cout << "Memory threshold: ";
+    if (memory_threshold == 0) {
+        std::cout << "disabled";
+    } else {
+        double mb = static_cast<double>(memory_threshold) / (1024 * 1024);
+        std::cout << std::fixed << std::setprecision(1) << mb << " MB";
+    }
+    std::cout << std::endl;
+    std::cout << "Segmentation: ";
+    if (hourly_mode) {
+        std::cout << "hourly (output.YYYYMMDD_HH.csv)";
+    } else if (daily_mode) {
+        std::cout << "daily (output.YYYYMMDD.csv)";
+    } else {
+        std::cout << "none (single file)";
+    }
+    std::cout << std::endl;
     std::cout << std::endl;
 
     // Display configuration
@@ -149,6 +218,18 @@ int main(int argc, char* argv[]) {
     // Create WebSocket client
     KrakenWebSocketClientSimdjsonV2 ws_client;
     g_ws_client = &ws_client;
+
+    // Configure flush parameters
+    ws_client.set_output_file(output_file);
+    ws_client.set_flush_interval(std::chrono::seconds(flush_interval));
+    ws_client.set_memory_threshold(memory_threshold);
+
+    // Configure segmentation mode
+    if (hourly_mode) {
+        ws_client.set_segment_mode(kraken::SegmentMode::HOURLY);
+    } else if (daily_mode) {
+        ws_client.set_segment_mode(kraken::SegmentMode::DAILY);
+    }
 
     // Setup callbacks
     ws_client.set_update_callback([&](const TickerRecord& record) {
@@ -212,10 +293,22 @@ int main(int argc, char* argv[]) {
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
 
         if (elapsed > 0 && elapsed % 30 == 0) {
+            size_t memory_bytes = ws_client.get_current_memory_usage();
+            double memory_mb = static_cast<double>(memory_bytes) / (1024 * 1024);
+
             std::cout << "\n[STATUS] Running time: " << elapsed << "s"
                       << " | Updates: " << update_count
-                      << " | Pending: " << ws_client.pending_count()
-                      << "\n" << std::endl;
+                      << " | Flushes: " << ws_client.get_flush_count()
+                      << " | Memory: " << std::fixed << std::setprecision(1) << memory_mb << "MB"
+                      << " | Pending: " << ws_client.pending_count();
+
+            // Show segment info if segmentation is enabled
+            if (hourly_mode || daily_mode) {
+                std::cout << "\n         Current file: " << ws_client.get_current_segment_filename()
+                          << " (" << ws_client.get_segment_count() << " files created)";
+            }
+
+            std::cout << "\n" << std::endl;
         }
     }
 
@@ -234,8 +327,22 @@ int main(int argc, char* argv[]) {
     std::cout << "==================================================" << std::endl;
     std::cout << "Pairs monitored: " << symbols.size() << std::endl;
     std::cout << "Total updates: " << update_count << std::endl;
+    std::cout << "Total flushes: " << ws_client.get_flush_count() << std::endl;
     std::cout << "Runtime: " << total_elapsed << " seconds" << std::endl;
-    std::cout << "Output file: " << output_file << std::endl;
+
+    if (hourly_mode || daily_mode) {
+        std::cout << "Files created: " << ws_client.get_segment_count() << std::endl;
+        std::cout << "Output pattern: " << output_file;
+        if (hourly_mode) {
+            std::cout << " -> *.YYYYMMDD_HH.csv";
+        } else {
+            std::cout << " -> *.YYYYMMDD.csv";
+        }
+        std::cout << std::endl;
+    } else {
+        std::cout << "Output file: " << output_file << std::endl;
+    }
+
     std::cout << "Shutdown complete." << std::endl;
 
     return 0;

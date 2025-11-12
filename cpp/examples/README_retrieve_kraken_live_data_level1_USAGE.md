@@ -122,18 +122,75 @@ Monitor stablecoin pairs:
 ./retrieve_kraken_live_data_level1 -p "USDT/USD,USDC/USD,DAI/USD,USDT/EUR,USDC/EUR"
 ```
 
-### Example 5: Long-Running Data Collection
+### Example 5: Long-Running Data Collection (24/7 Monitoring)
 
-Run for an extended period with output redirection:
+Run for extended periods with hourly file segmentation:
 
 ```bash
-# Run for 1 hour and save console output
-timeout 3600 ./retrieve_kraken_live_data_level1 -p "BTC/USD,ETH/USD,SOL/USD" \
-  > live_data_log.txt 2>&1
+# 24/7 monitoring with hourly files (recommended for production)
+./retrieve_kraken_live_data_level1 \
+  -p "BTC/USD,ETH/USD,SOL/USD" \
+  --hourly
 
-# Check the saved CSV
-head kraken_ticker_live_level1.csv
-wc -l kraken_ticker_live_level1.csv
+# Output files (one per hour):
+# kraken_ticker_live_level1.20251112_10.csv
+# kraken_ticker_live_level1.20251112_11.csv
+# kraken_ticker_live_level1.20251112_12.csv
+# ...
+```
+
+**Benefits of hourly segmentation**:
+- Manageable file sizes (~50-100 MB/hour)
+- Easy to process data in parallel
+- Can archive/compress old files
+- No memory issues (bounded at ~10MB)
+
+### Example 5b: Daily Aggregation
+
+For daily reports, use daily segmentation:
+
+```bash
+# One file per day
+./retrieve_kraken_live_data_level1 \
+  -p kraken_usd_volume.csv:pair:20 \
+  --daily \
+  -f 60
+
+# Output files:
+# kraken_ticker_live_level1.20251112.csv
+# kraken_ticker_live_level1.20251113.csv
+# ...
+```
+
+### Example 5c: Memory-Constrained Environment
+
+For systems with limited memory:
+
+```bash
+# Aggressive flushing: every 5 seconds OR 2MB
+./retrieve_kraken_live_data_level1 \
+  -p kraken_usd_volume.csv:pair:100 \
+  --hourly \
+  -f 5 \
+  -m 2097152 \
+  > monitor.log 2>&1
+```
+
+**Expected console output**:
+```
+==================================================
+Kraken Live Data Retriever - Level 1
+==================================================
+Subscribing to 100 pairs...
+Output file: kraken_ticker_live_level1.csv
+Flush interval: 5 seconds
+Memory threshold: 2.0 MB
+Segmentation: hourly (output.YYYYMMDD_HH.csv)
+
+[SEGMENT] Starting new file: kraken_ticker_live_level1.20251112_16.csv
+[FLUSH] Wrote 124 records to kraken_ticker_live_level1.20251112_16.csv
+...
+[STATUS] Running time: 30s | Updates: 856 | Flushes: 6 | Memory: 0.3MB | Pending: 12
 ```
 
 ### Example 6: Error Handling Examples
@@ -231,9 +288,9 @@ print(volatility.head(10))
 
 ## Production Deployment Examples
 
-### Example 7: Systemd Service
+### Example 7: Systemd Service (Production Deployment)
 
-Create a systemd service for continuous monitoring:
+Create a systemd service for 24/7 continuous monitoring:
 
 ```bash
 # /etc/systemd/system/kraken-monitor.service
@@ -246,49 +303,63 @@ Type=simple
 User=rocky
 WorkingDirectory=/export1/rocky/dev/kraken/cpp/build
 ExecStart=/export1/rocky/dev/kraken/cpp/build/retrieve_kraken_live_data_level1 \
-  -p /export1/rocky/dev/kraken/kraken_usd_volume.csv:pair:20
+  -p /export1/rocky/dev/kraken/kraken_usd_volume.csv:pair:50 \
+  --hourly \
+  -f 30 \
+  -m 10485760
 Restart=always
 RestartSec=10
+StandardOutput=append:/var/log/kraken-monitor.log
+StandardError=append:/var/log/kraken-monitor-error.log
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+**Key features**:
+- `--hourly`: Creates one file per hour (manageable sizes)
+- `-f 30 -m 10485760`: Flush every 30s or 10MB (bounded memory)
+- `Restart=always`: Auto-restart on failure
+- Logs to `/var/log/kraken-monitor.log`
 
 Enable and start:
 ```bash
 sudo systemctl enable kraken-monitor
 sudo systemctl start kraken-monitor
 sudo systemctl status kraken-monitor
+
+# View logs
+sudo journalctl -u kraken-monitor -f
 ```
 
-### Example 8: Cron Job with Rotation
+### Example 8: Data Archival with Auto-Cleanup
 
-Run for 1 hour every hour with log rotation:
-
-```bash
-# Add to crontab: crontab -e
-0 * * * * cd /export1/rocky/dev/kraken && ./scripts/hourly_monitor.sh
-```
+Archive old hourly files automatically:
 
 ```bash
 #!/bin/bash
-# scripts/hourly_monitor.sh
+# scripts/archive_old_data.sh
+# Run daily via cron: 0 2 * * * /path/to/archive_old_data.sh
 
 cd /export1/rocky/dev/kraken/cpp/build
 
-# Create timestamp
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+# Archive files older than 7 days
+find . -name "kraken_ticker_live_level1.*.csv" -type f -mtime +7 | while read file; do
+    # Compress and move to archive
+    gzip "$file"
+    mv "${file}.gz" /export1/rocky/archive/
+done
 
-# Run for 55 minutes (leave 5 minutes for processing)
-timeout 3300 ./retrieve_kraken_live_data_level1 \
-  -p /export1/rocky/dev/kraken/kraken_usd_volume.csv:pair:20 \
-  > /export1/rocky/logs/kraken_monitor_${TIMESTAMP}.log 2>&1
+# Delete files older than 30 days from archive
+find /export1/rocky/archive -name "*.csv.gz" -type f -mtime +30 -delete
 
-# Move CSV to archive
-if [ -f kraken_ticker_live_level1.csv ]; then
-  mv kraken_ticker_live_level1.csv \
-    /export1/rocky/data/kraken_ticker_${TIMESTAMP}.csv
-fi
+echo "$(date): Archive cleanup completed"
+```
+
+**Add to crontab**:
+```bash
+# Run archive cleanup daily at 2 AM
+0 2 * * * /export1/rocky/dev/kraken/scripts/archive_old_data.sh >> /var/log/archive_cleanup.log 2>&1
 ```
 
 ## Performance Tips
