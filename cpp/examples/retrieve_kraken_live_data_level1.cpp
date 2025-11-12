@@ -313,8 +313,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Shutdown
-    std::cout << "\nSaving data to " << output_file << "..." << std::endl;
-    ws_client.save_to_csv(output_file);
+    std::cout << "\nFlushing remaining data..." << std::endl;
+    ws_client.flush();
     ws_client.stop();
 
     auto end_time = std::chrono::steady_clock::now();

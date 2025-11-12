@@ -105,8 +105,8 @@ void JsonLinesWriter::perform_segment_transition(const std::string& new_filename
         file_.close();
     }
 
-    // Open new segment file
-    file_.open(new_filename, std::ios::out | std::ios::app);
+    // Open new segment file (use 'out' only to overwrite, not append)
+    file_.open(new_filename, std::ios::out);
 
     if (!file_.is_open()) {
         std::cerr << "Error: Cannot open segment file: " << new_filename << std::endl;

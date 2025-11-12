@@ -7,12 +7,19 @@
 #include <mutex>
 #include <atomic>
 #include <functional>
+#include <fstream>
 #include <websocketpp/config/asio_client.hpp>
 #include <websocketpp/client.hpp>
 #include "kraken_common.hpp"
 #include "flush_segment_mixin.hpp"
 
 namespace kraken {
+
+// Configuration constants
+namespace {
+    constexpr size_t MAX_LOGGED_FLUSHES = 3;  // Reduce log spam after N flushes
+    constexpr size_t RECORD_BUFFER_INITIAL_CAPACITY = 1000;  // ~30s at 30 updates/sec
+}
 
 /**
  * Base template class for WebSocket clients with different JSON parsers
@@ -44,19 +51,45 @@ public:
     KrakenWebSocketClientBase& operator=(const KrakenWebSocketClientBase&) = delete;
 
     // Public API
-    bool start(const std::vector<std::string>& symbols);
+    bool start(std::vector<std::string> symbols);
     void stop();
     bool is_connected() const;
     bool is_running() const;
     std::vector<TickerRecord> get_updates();
+
+    /**
+     * Get full history of all ticker records
+     * WARNING: This performs a deep copy of the entire history vector
+     * For large datasets (long-running sessions), this can be expensive
+     * Consider using pending_count() or get_updates() for frequent polling
+     */
     std::vector<TickerRecord> get_history() const;
+
     size_t pending_count() const;
     void set_update_callback(UpdateCallback callback);
     void set_connection_callback(ConnectionCallback callback);
     void set_error_callback(ErrorCallback callback);
+
+    /**
+     * Flush remaining buffered data to configured output file
+     * Use this after calling set_output_file() to ensure all data is written
+     * NOTE: Does nothing if no output file is configured
+     */
+    void flush();
+
+    /**
+     * Save all historical data to a specific file (one-shot snapshot)
+     * This creates a new file with all data and header, regardless of set_output_file()
+     * Use this for ad-hoc exports or when not using periodic flushing
+     * @param filename Target file to write snapshot
+     */
     void save_to_csv(const std::string& filename);
 
-    // Output file configuration
+    /**
+     * Set output file for periodic flushing
+     * NOTE: Should be called BEFORE start() to avoid race conditions
+     * File I/O operations are performed under data_mutex_
+     */
     void set_output_file(const std::string& filename);
 
     // Note: Flush/segment configuration methods inherited from FlushSegmentMixin:
@@ -89,7 +122,11 @@ protected:
     std::vector<TickerRecord> pending_updates_;
 
     // Output file configuration (protected by data_mutex_)
-    std::string output_filename_;  // Current output file (for compatibility)
+    // Note: output_filename_ and current_segment_filename_ (from mixin) relationship:
+    // - Non-segmented mode: both point to same file
+    // - Segmented mode: current_segment_filename_ has timestamp suffix, output_filename_ updated on transition
+    std::string output_filename_;  // Base filename or current segment filename
+    std::ofstream output_file_;    // Persistent file handle (unified with jsonl_writer approach)
     bool csv_header_written_;
 
     // Note: Flush/segment configuration inherited from FlushSegmentMixin:
@@ -175,10 +212,19 @@ KrakenWebSocketClientBase<JsonParser>::KrakenWebSocketClientBase()
 template<typename JsonParser>
 KrakenWebSocketClientBase<JsonParser>::~KrakenWebSocketClientBase() {
     stop();
+
+    // Flush and close output file if open
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    if (!ticker_history_.empty()) {
+        this->force_flush();
+    }
+    if (output_file_.is_open()) {
+        output_file_.close();
+    }
 }
 
 template<typename JsonParser>
-bool KrakenWebSocketClientBase<JsonParser>::start(const std::vector<std::string>& symbols) {
+bool KrakenWebSocketClientBase<JsonParser>::start(std::vector<std::string> symbols) {
     if (running_) {
         std::cerr << "Client already running" << std::endl;
         return false;
@@ -189,7 +235,7 @@ bool KrakenWebSocketClientBase<JsonParser>::start(const std::vector<std::string>
         return false;
     }
 
-    symbols_ = symbols;
+    symbols_ = std::move(symbols);
     running_ = true;
 
     worker_thread_ = std::thread([this]() {
@@ -273,18 +319,30 @@ void KrakenWebSocketClientBase<JsonParser>::set_error_callback(ErrorCallback cal
 }
 
 template<typename JsonParser>
+void KrakenWebSocketClientBase<JsonParser>::flush() {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+
+    if (output_filename_.empty()) {
+        std::cerr << "[Warning] flush() called but no output file configured. Use set_output_file() first." << std::endl;
+        return;
+    }
+
+    if (ticker_history_.empty()) {
+        return;  // Nothing to flush
+    }
+
+    // Force flush remaining buffered data
+    this->force_flush();
+    std::cout << "\nFinal flush completed." << std::endl;
+}
+
+template<typename JsonParser>
 void KrakenWebSocketClientBase<JsonParser>::save_to_csv(const std::string& filename) {
     std::lock_guard<std::mutex> lock(data_mutex_);
 
-    // If we have an output file configured and already wrote header,
-    // this is a final flush - just append remaining data
-    if (!output_filename_.empty() && csv_header_written_ && !ticker_history_.empty()) {
-        this->force_flush();  // Use mixin's force flush
-        std::cout << "\nFinal flush completed." << std::endl;
-    } else {
-        // Traditional behavior: write all data with header
-        Utils::save_to_csv(filename, ticker_history_);
-    }
+    // Always create a one-shot snapshot to the specified file
+    // This is independent of the configured output_file_ for periodic flushing
+    Utils::save_to_csv(filename, ticker_history_);
 }
 
 template<typename JsonParser>
@@ -292,6 +350,24 @@ void KrakenWebSocketClientBase<JsonParser>::set_output_file(const std::string& f
     std::lock_guard<std::mutex> lock(data_mutex_);
     output_filename_ = filename;
     this->set_base_filename(filename);  // Update mixin's base filename
+
+    // If segmentation is not enabled, open the file immediately
+    // (For segmented mode, file opens when set_segment_mode is called)
+    if (this->segment_mode_ == SegmentMode::NONE && !filename.empty()) {
+        // Close any previously open file
+        if (output_file_.is_open()) {
+            output_file_.close();
+        }
+
+        // Open new file
+        output_file_.open(filename, std::ios::out);
+        if (!output_file_.is_open()) {
+            std::cerr << "[Error] Cannot open output file: " << filename << std::endl;
+        } else {
+            csv_header_written_ = false;  // New file needs header
+            this->current_segment_filename_ = filename;
+        }
+    }
 }
 
 template<typename JsonParser>
@@ -305,7 +381,7 @@ KrakenWebSocketClientBase<JsonParser>::on_tls_init(websocketpp::connection_hdl) 
                         boost::asio::ssl::context::no_sslv2 |
                         boost::asio::ssl::context::no_sslv3 |
                         boost::asio::ssl::context::single_dh_use);
-    } catch (std::exception& e) {
+    } catch (const std::exception& e) {
         notify_error("TLS init error: " + std::string(e.what()));
     }
 
@@ -468,80 +544,83 @@ void KrakenWebSocketClientBase<JsonParser>::perform_flush() {
         return;
     }
 
-    // Don't flush if no output file configured
-    if (output_filename_.empty()) {
-        return;
-    }
-
-    // Determine which filename to use
-    std::string target_filename = (this->segment_mode_ == SegmentMode::NONE) ?
-                                  output_filename_ : this->current_segment_filename_;
-
-    // Determine open mode
-    std::ios_base::openmode mode = std::ios::out;
-    if (csv_header_written_) {
-        mode |= std::ios::app;  // Append mode
-    }
-
-    std::ofstream file(target_filename, mode);
-    if (!file.is_open()) {
-        std::cerr << "[Error] Could not open file " << target_filename << std::endl;
+    // Don't flush if no output file configured or file not open
+    if (!output_file_.is_open()) {
         return;
     }
 
     // Write header only on first write
     if (!csv_header_written_) {
-        file << "timestamp,pair,type,bid,bid_qty,ask,ask_qty,last,volume,vwap,low,high,change,change_pct\n";
+        output_file_ << "timestamp,pair,type,bid,bid_qty,ask,ask_qty,last,volume,vwap,low,high,change,change_pct\n";
         csv_header_written_ = true;
     }
 
     // Write data
     for (const auto& record : ticker_history_) {
-        file << record.timestamp << ","
-             << record.pair << ","
-             << record.type << ","
-             << record.bid << ","
-             << record.bid_qty << ","
-             << record.ask << ","
-             << record.ask_qty << ","
-             << record.last << ","
-             << record.volume << ","
-             << record.vwap << ","
-             << record.low << ","
-             << record.high << ","
-             << record.change << ","
-             << record.change_pct << "\n";
+        output_file_ << record.timestamp << ","
+                     << record.pair << ","
+                     << record.type << ","
+                     << record.bid << ","
+                     << record.bid_qty << ","
+                     << record.ask << ","
+                     << record.ask_qty << ","
+                     << record.last << ","
+                     << record.volume << ","
+                     << record.vwap << ","
+                     << record.low << ","
+                     << record.high << ","
+                     << record.change << ","
+                     << record.change_pct << "\n";
     }
 
-    file.close();
+    // Flush to disk
+    output_file_.flush();
 
     // Log flush (quiet output, only show on first few flushes)
-    if (this->get_flush_count() < 3) {
+    if (this->get_flush_count() < MAX_LOGGED_FLUSHES) {
+        std::string target_filename = (this->segment_mode_ == SegmentMode::NONE) ?
+                                      output_filename_ : this->current_segment_filename_;
         std::cout << "[FLUSH] Wrote " << ticker_history_.size() << " records to " << target_filename << std::endl;
     }
 
     // Clear buffer
     ticker_history_.clear();
-    ticker_history_.reserve(1000);  // Pre-allocate to reduce reallocations
+    ticker_history_.reserve(RECORD_BUFFER_INITIAL_CAPACITY);
 }
 
 template<typename JsonParser>
 void KrakenWebSocketClientBase<JsonParser>::perform_segment_transition(const std::string& new_filename) {
     // Must be called with data_mutex_ held!
 
+    // Close current file
+    if (output_file_.is_open()) {
+        output_file_.close();
+    }
+
     // Mark that new file needs header
     csv_header_written_ = false;
 
-    // Update output filename for next flush
+    // Update output filename
     output_filename_ = new_filename;
+
+    // Open new segment file (use 'out' only to overwrite, not append)
+    output_file_.open(new_filename, std::ios::out);
+
+    if (!output_file_.is_open()) {
+        std::cerr << "[Error] Cannot open segment file: " << new_filename << std::endl;
+    }
 
     std::cout << "[SEGMENT] Starting new file: " << new_filename << std::endl;
 }
 
 template<typename JsonParser>
 void KrakenWebSocketClientBase<JsonParser>::on_segment_mode_set() {
-    // Must be called with data_mutex_ held!
-    // Nothing special needed for Level 1 - segments are created on-demand
+    // NOTE: Called from FlushSegmentMixin::set_segment_mode() WITHOUT lock
+    // We must acquire data_mutex_ here to protect file operations
+    std::lock_guard<std::mutex> lock(data_mutex_);
+
+    // Create first segment file when segmentation is enabled (unified with jsonl_writer)
+    perform_segment_transition(this->current_segment_filename_);
 }
 
 } // namespace kraken
