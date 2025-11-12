@@ -1,5 +1,5 @@
 /**
- * JSON Lines Writer for Order Book Data - Implementation
+ * JSON Lines Writer for Order Book Data - Implementation (CRTP Refactored Version)
  */
 
 #include "jsonl_writer.hpp"
@@ -12,29 +12,22 @@ namespace kraken {
 // ============================================================================
 
 JsonLinesWriter::JsonLinesWriter(const std::string& filename, bool append)
-    : filename_(filename),
-      record_count_(0),
-      flush_interval_(30),                           // Default: 30 seconds
-      memory_threshold_bytes_(10 * 1024 * 1024),    // Default: 10 MB
-      flush_count_(0),
-      segment_mode_(SegmentMode::NONE),
-      base_filename_(filename),
-      segment_count_(0) {
+    : FlushSegmentMixin<JsonLinesWriter>(),  // Initialize mixin
+      record_count_(0) {
 
-    last_flush_time_ = std::chrono::steady_clock::now();
+    // Store base filename for segmentation
+    set_base_filename(filename);
+
+    // Note: File opens later:
+    // - When set_segment_mode() is called (if segmentation enabled)
+    // - On first write_record() (if segmentation disabled)
     record_buffer_.reserve(1000);  // Pre-allocate for efficiency
-
-    // Note: Don't open file here - wait for configuration to be set
-    // File will be opened either:
-    // 1. When set_segment_mode() is called (if segmentation enabled)
-    // 2. On first write_record() (if segmentation disabled)
-    current_segment_filename_ = filename;
 }
 
 JsonLinesWriter::~JsonLinesWriter() {
     // Flush any remaining buffered records
     if (!record_buffer_.empty()) {
-        flush_buffer();
+        force_flush();
     }
 
     if (file_.is_open()) {
@@ -49,6 +42,85 @@ bool JsonLinesWriter::is_open() const {
 size_t JsonLinesWriter::get_record_count() const {
     return record_count_;
 }
+
+bool JsonLinesWriter::write_record(const OrderBookRecord& record) {
+    // Open file on first write if not already open (non-segmented mode)
+    if (!file_.is_open() && segment_mode_ == SegmentMode::NONE) {
+        file_.open(base_filename_, std::ios::out);
+        if (!file_.is_open()) {
+            std::cerr << "Error: Cannot open file for writing: " << base_filename_ << std::endl;
+            return false;
+        }
+        current_segment_filename_ = base_filename_;
+    }
+
+    if (!file_.is_open()) {
+        return false;
+    }
+
+    // Add record to buffer
+    record_buffer_.push_back(record);
+
+    // CRTP: Single call handles everything automatically
+    // - Segment transition detection
+    // - Flush before segment transition
+    // - Regular periodic flush
+    // - Statistics tracking
+    check_and_flush();
+
+    return true;
+}
+
+void JsonLinesWriter::flush() {
+    force_flush();
+}
+
+// ============================================================================
+// CRTP Interface Implementation
+// ============================================================================
+
+void JsonLinesWriter::perform_flush() {
+    if (!file_.is_open() || record_buffer_.empty()) {
+        return;
+    }
+
+    // Write all buffered records to file
+    for (const auto& record : record_buffer_) {
+        std::string json = record_to_json(record);
+        file_ << json << std::endl;
+        record_count_++;
+    }
+
+    // Flush to disk
+    file_.flush();
+
+    // Clear buffer
+    record_buffer_.clear();
+    record_buffer_.reserve(1000);
+}
+
+void JsonLinesWriter::perform_segment_transition(const std::string& new_filename) {
+    // Close current file
+    if (file_.is_open()) {
+        file_.close();
+    }
+
+    // Open new segment file
+    file_.open(new_filename, std::ios::out | std::ios::app);
+
+    if (!file_.is_open()) {
+        std::cerr << "Error: Cannot open segment file: " << new_filename << std::endl;
+    }
+}
+
+void JsonLinesWriter::on_segment_mode_set() {
+    // Create first segment file when segmentation is enabled
+    perform_segment_transition(current_segment_filename_);
+}
+
+// ============================================================================
+// JSON Serialization
+// ============================================================================
 
 std::string JsonLinesWriter::escape_json_string(const std::string& str) const {
     std::ostringstream oss;
@@ -108,230 +180,6 @@ std::string JsonLinesWriter::record_to_json(const OrderBookRecord& record) const
     oss << "}";
 
     return oss.str();
-}
-
-bool JsonLinesWriter::write_record(const OrderBookRecord& record) {
-    // Open file on first write if not already open (for non-segmented mode)
-    if (!file_.is_open() && segment_mode_ == SegmentMode::NONE) {
-        file_.open(base_filename_, std::ios::out);
-        if (!file_.is_open()) {
-            std::cerr << "Error: Cannot open file for writing: " << base_filename_ << std::endl;
-            return false;
-        }
-        current_segment_filename_ = base_filename_;
-    }
-
-    if (!file_.is_open()) {
-        return false;
-    }
-
-    // Check for segment transition
-    if (should_transition_segment()) {
-        // Flush current buffer before transitioning
-        if (!record_buffer_.empty()) {
-            flush_buffer();
-        }
-        create_new_segment();
-    }
-
-    // Add record to buffer
-    record_buffer_.push_back(record);
-
-    // Check if flush is needed
-    if (should_flush()) {
-        flush_buffer();
-    }
-
-    return true;
-}
-
-void JsonLinesWriter::flush() {
-    if (!record_buffer_.empty()) {
-        flush_buffer();
-    }
-}
-
-// ========================================================================
-// Flush Configuration
-// ========================================================================
-
-void JsonLinesWriter::set_flush_interval(std::chrono::seconds interval) {
-    flush_interval_ = interval;
-}
-
-void JsonLinesWriter::set_memory_threshold(size_t bytes) {
-    memory_threshold_bytes_ = bytes;
-}
-
-size_t JsonLinesWriter::get_flush_count() const {
-    return flush_count_;
-}
-
-size_t JsonLinesWriter::get_current_memory_usage() const {
-    return record_buffer_.size() * sizeof(OrderBookRecord);
-}
-
-// ========================================================================
-// Segmentation Configuration
-// ========================================================================
-
-void JsonLinesWriter::set_segment_mode(SegmentMode mode) {
-    segment_mode_ = mode;
-    if (mode != SegmentMode::NONE) {
-        // Close existing file if open
-        if (file_.is_open()) {
-            file_.close();
-        }
-
-        // Create first segment
-        current_segment_key_ = generate_segment_key();
-        current_segment_filename_ = insert_segment_key(base_filename_, current_segment_key_);
-
-        // Open first segment file
-        file_.open(current_segment_filename_, std::ios::out | std::ios::app);
-
-        if (!file_.is_open()) {
-            std::cerr << "Error: Cannot open segment file: " << current_segment_filename_ << std::endl;
-            return;
-        }
-
-        segment_count_ = 1;
-        std::cout << "[SEGMENT] Starting new file: " << current_segment_filename_ << std::endl;
-    }
-}
-
-std::string JsonLinesWriter::get_current_segment_filename() const {
-    return current_segment_filename_;
-}
-
-size_t JsonLinesWriter::get_segment_count() const {
-    return segment_count_;
-}
-
-// ========================================================================
-// Private Helper Methods
-// ========================================================================
-
-bool JsonLinesWriter::should_flush() const {
-    if (record_buffer_.empty()) {
-        return false;
-    }
-
-    // Time-based trigger
-    bool time_exceeded = false;
-    if (flush_interval_.count() > 0) {
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            now - last_flush_time_);
-        time_exceeded = (elapsed >= flush_interval_);
-    }
-
-    // Memory-based trigger
-    bool memory_exceeded = false;
-    if (memory_threshold_bytes_ > 0) {
-        size_t memory_bytes = record_buffer_.size() * sizeof(OrderBookRecord);
-        memory_exceeded = (memory_bytes >= memory_threshold_bytes_);
-    }
-
-    // OR logic: flush if either condition is met
-    return time_exceeded || memory_exceeded;
-}
-
-void JsonLinesWriter::flush_buffer() {
-    if (!file_.is_open() || record_buffer_.empty()) {
-        return;
-    }
-
-    // Write all buffered records to file
-    for (const auto& record : record_buffer_) {
-        std::string json = record_to_json(record);
-        file_ << json << std::endl;
-        record_count_++;
-    }
-
-    // Flush to disk
-    file_.flush();
-
-    // Clear buffer
-    record_buffer_.clear();
-    record_buffer_.reserve(1000);
-
-    // Update statistics
-    flush_count_++;
-    last_flush_time_ = std::chrono::steady_clock::now();
-
-    // Log flush (quiet mode after 3 flushes)
-    if (flush_count_ <= 3) {
-        std::cout << "[FLUSH] Wrote records to " << current_segment_filename_ << std::endl;
-    }
-}
-
-std::string JsonLinesWriter::generate_segment_key() const {
-    auto now = std::time(nullptr);
-    auto tm = *std::gmtime(&now);
-
-    char buffer[32];
-    if (segment_mode_ == SegmentMode::HOURLY) {
-        // Format: YYYYMMDD_HH
-        std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H", &tm);
-    } else if (segment_mode_ == SegmentMode::DAILY) {
-        // Format: YYYYMMDD
-        std::strftime(buffer, sizeof(buffer), "%Y%m%d", &tm);
-    } else {
-        return "";
-    }
-
-    return std::string(buffer);
-}
-
-bool JsonLinesWriter::should_transition_segment() {
-    if (segment_mode_ == SegmentMode::NONE) {
-        return false;
-    }
-
-    std::string new_key = generate_segment_key();
-    return new_key != current_segment_key_;
-}
-
-void JsonLinesWriter::create_new_segment() {
-    // Close current file
-    if (file_.is_open()) {
-        file_.close();
-    }
-
-    // Generate new segment key
-    current_segment_key_ = generate_segment_key();
-
-    // Create new filename
-    current_segment_filename_ = insert_segment_key(base_filename_, current_segment_key_);
-
-    // Open new file
-    file_.open(current_segment_filename_, std::ios::out | std::ios::app);
-
-    if (!file_.is_open()) {
-        std::cerr << "Error: Cannot open segment file: " << current_segment_filename_ << std::endl;
-        return;
-    }
-
-    // Increment segment count
-    segment_count_++;
-
-    // Log segment transition
-    std::cout << "[SEGMENT] Starting new file: " << current_segment_filename_ << std::endl;
-}
-
-std::string JsonLinesWriter::insert_segment_key(const std::string& base, const std::string& key) const {
-    // Find the extension (.jsonl)
-    size_t ext_pos = base.rfind(".jsonl");
-    if (ext_pos == std::string::npos) {
-        // No .jsonl extension, just append
-        return base + "." + key + ".jsonl";
-    }
-
-    // Insert segment key before extension
-    std::string result = base.substr(0, ext_pos);
-    result += "." + key + ".jsonl";
-    return result;
 }
 
 // ============================================================================

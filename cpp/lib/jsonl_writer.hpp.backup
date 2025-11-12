@@ -1,33 +1,39 @@
 /**
- * JSON Lines Writer for Order Book Data (CRTP Refactored Version)
+ * JSON Lines Writer for Order Book Data
  *
  * Writes OrderBookRecord data to .jsonl (JSON Lines) format
  * One JSON object per line, suitable for streaming data
- *
- * Uses FlushSegmentMixin for periodic flushing and segmentation
  */
 
 #ifndef JSONL_WRITER_HPP
 #define JSONL_WRITER_HPP
 
 #include "orderbook_common.hpp"
-#include "flush_segment_mixin.hpp"
 #include <fstream>
 #include <string>
 #include <sstream>
 #include <iomanip>
 #include <map>
 #include <vector>
+#include <chrono>
+#include <ctime>
 
 namespace kraken {
+
+/**
+ * Segmentation mode for time-based file splitting
+ */
+enum class SegmentMode {
+    NONE,    // Single file (default)
+    HOURLY,  // One file per hour (YYYYMMDD_HH)
+    DAILY    // One file per day (YYYYMMDD)
+};
 
 /**
  * JSON Lines Writer
  * Writes order book records to .jsonl format with periodic flushing and segmentation
  */
-class JsonLinesWriter : public FlushSegmentMixin<JsonLinesWriter> {
-    friend class FlushSegmentMixin<JsonLinesWriter>;  // Allow mixin to access private interface
-
+class JsonLinesWriter {
 public:
     /**
      * Constructor
@@ -61,63 +67,74 @@ public:
      */
     size_t get_record_count() const;
 
-    // Note: Flush/segment configuration methods inherited from FlushSegmentMixin
-    // - void set_flush_interval(std::chrono::seconds interval)
-    // - void set_memory_threshold(size_t bytes)
-    // - void set_segment_mode(SegmentMode mode)
-    // - size_t get_flush_count() const
-    // - size_t get_current_memory_usage() const
-    // - size_t get_segment_count() const
-    // - std::string get_current_segment_filename() const
+    // ========================================================================
+    // Flush Configuration
+    // ========================================================================
+
+    /**
+     * Set flush interval (time-based trigger)
+     * @param interval Flush interval (0 to disable)
+     */
+    void set_flush_interval(std::chrono::seconds interval);
+
+    /**
+     * Set memory threshold (memory-based trigger)
+     * @param bytes Memory threshold in bytes (0 to disable)
+     */
+    void set_memory_threshold(size_t bytes);
+
+    /**
+     * Get flush count
+     */
+    size_t get_flush_count() const;
+
+    /**
+     * Get current memory usage (buffered records)
+     */
+    size_t get_current_memory_usage() const;
+
+    // ========================================================================
+    // Segmentation Configuration
+    // ========================================================================
+
+    /**
+     * Set segmentation mode
+     * @param mode NONE, HOURLY, or DAILY
+     */
+    void set_segment_mode(SegmentMode mode);
+
+    /**
+     * Get current segment filename
+     */
+    std::string get_current_segment_filename() const;
+
+    /**
+     * Get segment count
+     */
+    size_t get_segment_count() const;
 
 private:
     std::ofstream file_;
+    std::string filename_;
     size_t record_count_;
+
+    // ========================================================================
+    // Buffering and Flush Configuration
+    // ========================================================================
     std::vector<OrderBookRecord> record_buffer_;      // Buffered records
+    std::chrono::seconds flush_interval_;             // Time-based flush trigger
+    size_t memory_threshold_bytes_;                   // Memory-based flush trigger
+    std::chrono::steady_clock::time_point last_flush_time_;
+    size_t flush_count_;
 
     // ========================================================================
-    // CRTP Interface Implementation (required by FlushSegmentMixin)
+    // Segmentation Configuration
     // ========================================================================
-
-    /**
-     * Get buffer size (required by CRTP)
-     */
-    size_t get_buffer_size() const {
-        return record_buffer_.size();
-    }
-
-    /**
-     * Get record size (required by CRTP)
-     */
-    size_t get_record_size() const {
-        return sizeof(OrderBookRecord);
-    }
-
-    /**
-     * Get file extension (required by CRTP)
-     */
-    std::string get_file_extension() const {
-        return ".jsonl";
-    }
-
-    /**
-     * Perform actual flush to disk (required by CRTP)
-     */
-    void perform_flush();
-
-    /**
-     * Perform segment transition (required by CRTP)
-     */
-    void perform_segment_transition(const std::string& new_filename);
-
-    /**
-     * Called when segmentation mode is set (required by CRTP)
-     */
-    void on_segment_mode_set();
-
-    // ========================================================================
-    // JSON Serialization
-    // ========================================================================
+    SegmentMode segment_mode_;
+    std::string base_filename_;                       // Original filename without segment suffix
+    std::string current_segment_filename_;            // Current segment filename
+    std::string current_segment_key_;                 // Current segment key (YYYYMMDD_HH or YYYYMMDD)
+    size_t segment_count_;
 
     /**
      * Convert OrderBookRecord to JSON string
@@ -133,6 +150,38 @@ private:
      * Format price level array to JSON
      */
     std::string price_levels_to_json(const std::vector<PriceLevel>& levels) const;
+
+    /**
+     * Check if flush should be triggered
+     */
+    bool should_flush() const;
+
+    /**
+     * Flush buffered records to file
+     */
+    void flush_buffer();
+
+    /**
+     * Generate segment key based on current time
+     * Returns YYYYMMDD_HH for hourly, YYYYMMDD for daily
+     */
+    std::string generate_segment_key() const;
+
+    /**
+     * Check if segment transition is needed
+     */
+    bool should_transition_segment();
+
+    /**
+     * Create new segment file
+     */
+    void create_new_segment();
+
+    /**
+     * Insert segment key into filename
+     * E.g., "orderbook.jsonl" -> "orderbook.20251112_10.jsonl"
+     */
+    std::string insert_segment_key(const std::string& base, const std::string& key) const;
 };
 
 /**
