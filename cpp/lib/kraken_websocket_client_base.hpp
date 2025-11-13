@@ -55,6 +55,30 @@ public:
     void stop();
     bool is_connected() const;
     bool is_running() const;
+
+    /**
+     * Get pending updates (polling pattern)
+     *
+     * Returns all updates received since the last call to get_updates().
+     * The internal buffer is cleared after this call.
+     *
+     * IMPORTANT: If using periodic flushing (set_output_file + set_flush_interval),
+     * you must call get_updates() more frequently than the flush_interval to avoid
+     * data loss. During periodic flush, pending_updates_ is automatically cleared
+     * to prevent memory leaks in callback-driven mode.
+     *
+     * Recommended: Poll at least every (flush_interval / 2)
+     *
+     * Example:
+     *   client.set_flush_interval(std::chrono::seconds(30));
+     *   while (running) {
+     *     std::this_thread::sleep_for(std::chrono::seconds(10));  // < 30s
+     *     auto updates = client.get_updates();
+     *     // process updates
+     *   }
+     *
+     * @return Vector of all pending ticker records (moves data, clears internal buffer)
+     */
     std::vector<TickerRecord> get_updates();
 
     /**
@@ -583,9 +607,14 @@ void KrakenWebSocketClientBase<JsonParser>::perform_flush() {
         std::cout << "[FLUSH] Wrote " << ticker_history_.size() << " records to " << target_filename << std::endl;
     }
 
-    // Clear buffer
+    // Clear buffers
     ticker_history_.clear();
     ticker_history_.reserve(RECORD_BUFFER_INITIAL_CAPACITY);
+
+    // Also clear pending_updates_ to prevent memory leak in callback-driven mode
+    // NOTE: If using polling pattern, call get_updates() more frequently than
+    //       flush_interval_ to avoid data loss. See get_updates() documentation.
+    pending_updates_.clear();
 }
 
 template<typename JsonParser>
