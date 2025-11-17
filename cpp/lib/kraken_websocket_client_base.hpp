@@ -143,6 +143,8 @@ protected:
     // Data storage (protected by data_mutex_)
     mutable std::mutex data_mutex_;
     std::vector<TickerRecord> ticker_history_;
+
+    // pending_updates is used for polling pattern when there is no update_callback_ defined
     std::vector<TickerRecord> pending_updates_;
 
     // Output file configuration (protected by data_mutex_)
