@@ -34,6 +34,22 @@ struct SimdjsonParser {
         return subscribe_msg.str();
     }
 
+    static std::string build_unsubscribe(const std::vector<std::string>& symbols) {
+        // simdjson is read-only, so build JSON manually
+        std::ostringstream unsubscribe_msg;
+        unsubscribe_msg << R"({"method":"unsubscribe","params":{)";
+        unsubscribe_msg << R"("channel":"ticker",)";
+        unsubscribe_msg << R"("symbol":[)";
+
+        for (size_t i = 0; i < symbols.size(); ++i) {
+            if (i > 0) unsubscribe_msg << ",";
+            unsubscribe_msg << "\"" << symbols[i] << "\"";
+        }
+
+        unsubscribe_msg << R"(]}})";
+        return unsubscribe_msg.str();
+    }
+
     static void parse_message(const std::string& payload,
                               std::function<void(const TickerRecord&)> callback) {
         try {

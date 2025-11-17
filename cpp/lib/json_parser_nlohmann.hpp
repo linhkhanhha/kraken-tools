@@ -31,6 +31,17 @@ struct NlohmannJsonParser {
         return subscribe_msg.dump();
     }
 
+    static std::string build_unsubscribe(const std::vector<std::string>& symbols) {
+        json unsubscribe_msg = {
+            {"method", "unsubscribe"},
+            {"params", {
+                {"channel", "ticker"},
+                {"symbol", symbols}
+            }}
+        };
+        return unsubscribe_msg.dump();
+    }
+
     static void parse_message(const std::string& payload,
                               std::function<void(const TickerRecord&)> callback) {
         json data = json::parse(payload);

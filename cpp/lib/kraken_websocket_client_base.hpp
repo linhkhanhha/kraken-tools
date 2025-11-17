@@ -8,6 +8,7 @@
 #include <atomic>
 #include <functional>
 #include <fstream>
+#include <algorithm>
 #include <websocketpp/config/asio_client.hpp>
 #include <websocketpp/client.hpp>
 #include "kraken_common.hpp"
@@ -115,6 +116,22 @@ public:
      * File I/O operations are performed under data_mutex_
      */
     void set_output_file(const std::string& filename);
+
+    /**
+     * Subscribe to additional symbols while connected
+     * Updates internal symbols_ vector with new symbols
+     * @param symbols Vector of symbols to subscribe to (e.g., {"BTC/USD", "ETH/USD"})
+     * @return true if subscription message sent successfully, false if not connected
+     */
+    bool subscribe_symbols(const std::vector<std::string>& symbols);
+
+    /**
+     * Unsubscribe from symbols while connected
+     * Removes symbols from internal symbols_ vector
+     * @param symbols Vector of symbols to unsubscribe from
+     * @return true if unsubscribe message sent successfully, false if not connected
+     */
+    bool unsubscribe_symbols(const std::vector<std::string>& symbols);
 
     // Note: Flush/segment configuration methods inherited from FlushSegmentMixin:
     // - void set_flush_interval(std::chrono::seconds interval)
@@ -555,6 +572,78 @@ void KrakenWebSocketClientBase<JsonParser>::add_record(const TickerRecord& recor
         if (update_callback_) {
             update_callback_(record);
         }
+    }
+}
+
+template<typename JsonParser>
+bool KrakenWebSocketClientBase<JsonParser>::subscribe_symbols(
+    const std::vector<std::string>& symbols) {
+
+    if (!is_connected()) {
+        std::cerr << "Cannot subscribe: WebSocket not connected" << std::endl;
+        return false;
+    }
+
+    if (symbols.empty()) {
+        std::cerr << "Cannot subscribe: No symbols provided" << std::endl;
+        return false;
+    }
+
+    // Build and send subscription message
+    std::string msg_str = JsonParser::build_subscription(symbols);
+
+    try {
+        ws_client_.send(connection_hdl_, msg_str, websocketpp::frame::opcode::text);
+
+        // Add symbols to internal list (avoid duplicates)
+        for (const auto& symbol : symbols) {
+            auto it = std::find(symbols_.begin(), symbols_.end(), symbol);
+            if (it == symbols_.end()) {
+                symbols_.push_back(symbol);
+            }
+        }
+
+        std::cout << "Subscribed to " << symbols.size() << " additional symbol(s)" << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        notify_error("Failed to send subscribe message: " + std::string(e.what()));
+        return false;
+    }
+}
+
+template<typename JsonParser>
+bool KrakenWebSocketClientBase<JsonParser>::unsubscribe_symbols(
+    const std::vector<std::string>& symbols) {
+
+    if (!is_connected()) {
+        std::cerr << "Cannot unsubscribe: WebSocket not connected" << std::endl;
+        return false;
+    }
+
+    if (symbols.empty()) {
+        std::cerr << "Cannot unsubscribe: No symbols provided" << std::endl;
+        return false;
+    }
+
+    // Build and send unsubscription message
+    std::string msg_str = JsonParser::build_unsubscribe(symbols);
+
+    try {
+        ws_client_.send(connection_hdl_, msg_str, websocketpp::frame::opcode::text);
+
+        // Remove symbols from internal list
+        for (const auto& symbol : symbols) {
+            auto it = std::find(symbols_.begin(), symbols_.end(), symbol);
+            if (it != symbols_.end()) {
+                symbols_.erase(it);
+            }
+        }
+
+        std::cout << "Unsubscribed from " << symbols.size() << " symbol(s)" << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        notify_error("Failed to send unsubscribe message: " + std::string(e.what()));
+        return false;
     }
 }
 
